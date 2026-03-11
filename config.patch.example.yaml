@@ -1,0 +1,30 @@
+# 更新器补丁配置（示例）
+# 复制为 config.patch.yaml 后按需修改。
+# 注意：这里可能包含敏感 key，请勿提交到公开仓库。
+
+# 如果安装目录里的 config.yaml 没有 secret-key，则写入这个值
+# （示例里用占位符，避免泄露真实 key）
+secret-key: "change-me"
+
+# 确保 api-keys 列表里包含这些 key（会在已有列表基础上追加去重）
+api-keys:
+  - "your-api-key-1"
+
+# Proxy URL. Supports socks5/http/https protocols. Example: socks5://user:pass@192.168.1.1:1080/
+# 说明：这里是“顶层 proxy-url”（不是 codex-api-key-block 里的那些 proxy-url）。
+# - 不写这一项：脚本不会改动目标 config.yaml 的 proxy-url
+# - 写成 ""：脚本会把目标 config.yaml 的 proxy-url 清空
+proxy-url: ""
+
+# 将目标 config.yaml 里的 codex-api-key 整段替换为下面这段（保持原样即可）
+# 提醒：这里的 api-key/base-url 都是示例占位符，请替换成你自己的真实值。
+codex-api-key-block: |
+  codex-api-key:
+    - api-key: "sk-your-codex-key-1"
+      base-url: "https://example.com/v1"
+      # 可选：每个 key 单独指定 proxy（如果不需要可删掉）
+      # proxy-url: "socks5://user:pass@127.0.0.1:1080"
+      models:
+        - name: gpt-5
+        - name: gpt-5-codex
+        - name: gpt-5-codex-mini

@@ -1,0 +1,21 @@
+# --- OS / Editor ---
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# VSCode
+.vscode/
+
+# --- PowerShell ---
+*.ps1xml
+
+# --- Local patch config (may contain secrets) ---
+config.patch.yaml
+
+# --- CLIProxyAPI install / runtime artifacts ---
+CLIProxyAPI/*
+
+# --- Downloaded release zips ---
+*_windows_amd64.zip
+*.partial
+
