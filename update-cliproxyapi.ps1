@@ -284,7 +284,10 @@ function Get-TopLevelBlockRange {
 
   $start = -1
   for ($i = 0; $i -lt $Lines.Count; $i++) {
-    if ($Lines[$i] -match "^(?!\s*#)\s*$([regex]::Escape($KeyName))\s*:\s*(#.*)?$") {
+    $line = $Lines[$i]
+
+    # Only match true top-level keys (no indentation). Also tolerate a UTF-8 BOM on the first line.
+    if ($line -match "^(?:\uFEFF)?$([regex]::Escape($KeyName))\s*:\s*(#.*)?$") {
       $start = $i
       break
     }
@@ -293,8 +296,10 @@ function Get-TopLevelBlockRange {
 
   $end = $Lines.Count
   for ($j = $start + 1; $j -lt $Lines.Count; $j++) {
+    $l = $Lines[$j]
+
     # Next top-level key (non-indented, not comment)
-    if ($Lines[$j] -match '^(?!\s*#)\S[^:]*:\s*') {
+    if ($l -match '^(?:\uFEFF)?[^#\s][^:]*:\s*') {
       $end = $j
       break
     }
@@ -310,7 +315,8 @@ function Get-ScalarTopLevelValue {
   )
 
   foreach ($line in $Lines) {
-    if ($line -match "^(?!\s*#)\s*$([regex]::Escape($KeyName))\s*:\s*(.*?)\s*(#.*)?$") {
+    # Only match true top-level scalar keys (no indentation)
+    if ($line -match "^(?:\uFEFF)?$([regex]::Escape($KeyName))\s*:\s*(.*?)\s*(#.*)?$") {
       return $Matches[1]
     }
   }
@@ -345,7 +351,8 @@ function Upsert-ScalarTopLevelKey {
   )
 
   for ($i = 0; $i -lt $Lines.Count; $i++) {
-    if ($Lines[$i] -match "^(?!\s*#)\s*$([regex]::Escape($KeyName))\s*:\s*(.*?)\s*(#.*)?$") {
+    # Only match true top-level scalar keys (no indentation)
+    if ($Lines[$i] -match "^(?:\uFEFF)?$([regex]::Escape($KeyName))\s*:\s*(.*?)\s*(#.*)?$") {
       # Keep existing value; do not overwrite
       return $Lines
     }
@@ -367,7 +374,8 @@ function Set-ScalarTopLevelKey {
   )
 
   for ($i = 0; $i -lt $Lines.Count; $i++) {
-    if ($Lines[$i] -match "^(?!\s*#)\s*$([regex]::Escape($KeyName))\s*:\s*(.*?)\s*(#.*)?$") {
+    # Only match true top-level scalar keys (no indentation)
+    if ($Lines[$i] -match "^(?:\uFEFF)?$([regex]::Escape($KeyName))\s*:\s*(.*?)\s*(#.*)?$") {
       $comment = $Matches[2]
       if ([string]::IsNullOrWhiteSpace($comment)) {
         $Lines[$i] = "${KeyName}: $Value"
@@ -471,6 +479,9 @@ function Parse-PatchConfig {
     CodexBlock = $null
   }
 
+  $baseIndent = $null
+  $codexSource = $null
+
   $i = 0
   while ($i -lt $lines.Count) {
     $line = $lines[$i]
@@ -478,9 +489,10 @@ function Parse-PatchConfig {
     # Be robust to odd whitespace/encodings: strip BOM on the line start, then ignore indentation.
     $trimStart = $line.TrimStart().TrimStart([char]0xFEFF)
 
-    if ($trimStart -eq '' -or $trimStart.StartsWith('#')) { $i++; continue }
+    if ($trimStart -eq '' -or $trimStart.StartsWith('#') -or $trimStart -eq '---') { $i++; continue }
 
     $headerIndent = $line.Length - $line.TrimStart().Length
+    if ($null -eq $baseIndent) { $baseIndent = $headerIndent }
 
     if ($trimStart -match '^secret-key\s*:\s*(.*?)\s*(#.*)?$') {
       $v = $Matches[1].Trim()
@@ -500,6 +512,8 @@ function Parse-PatchConfig {
     }
 
     if ($trimStart -match '^api-keys\s*:\s*(#.*)?$') {
+      if ($headerIndent -ne $baseIndent) { $i++; continue }
+
       $keys = New-Object System.Collections.Generic.List[string]
       $i++
       while ($i -lt $lines.Count) {
@@ -527,6 +541,8 @@ function Parse-PatchConfig {
     }
 
     if ($trimStart -match '^proxy-url\s*:\s*(.*?)\s*(#.*)?$') {
+      if ($headerIndent -ne $baseIndent) { $i++; continue }
+
       $v = $Matches[1].Trim()
       # Strip quotes (both single and double) if present
       if ($v.Length -ge 2 -and (($v.StartsWith('"') -and $v.EndsWith('"')) -or ($v.StartsWith("'") -and $v.EndsWith("'")))) {
@@ -543,6 +559,10 @@ function Parse-PatchConfig {
     }
 
     if ($trimStart -match '^codex-api-key-block\s*:\s*\|[\+\-]?\s*(#.*)?$') {
+      if ($headerIndent -ne $baseIndent) { $i++; continue }
+
+      $codexSource = 'codex-api-key-block'
+
       $blockLines = New-Object System.Collections.Generic.List[string]
       $i++
       while ($i -lt $lines.Count) {
@@ -571,6 +591,40 @@ function Parse-PatchConfig {
       $normalized = @()
       foreach ($bl in $blockLines) {
         if ($bl.Length -ge $minIndent) { $normalized += $bl.Substring($minIndent) } else { $normalized += $bl }
+      }
+
+      $out.CodexBlock = ($normalized -join "`n").TrimEnd()
+      continue
+    }
+
+    # Compatibility: allow users to provide codex-api-key directly (instead of codex-api-key-block)
+    if ($trimStart -match '^codex-api-key\s*:\s*(#.*)?$') {
+      if ($headerIndent -ne $baseIndent) { $i++; continue }
+
+      $codexSource = 'codex-api-key'
+
+      $blockLines = New-Object System.Collections.Generic.List[string]
+      $blockLines.Add('codex-api-key:')
+      $i++
+      while ($i -lt $lines.Count) {
+        $l2 = $lines[$i]
+        $t2 = $l2.TrimStart().TrimStart([char]0xFEFF)
+
+        if ($t2 -ne '' -and -not $t2.StartsWith('#')) {
+          $indent2 = $l2.Length - $l2.TrimStart().Length
+          if ($indent2 -le $headerIndent) { break }
+        }
+
+        $blockLines.Add($l2)
+        $i++
+      }
+
+      # Normalize indentation: strip the indentation of the codex-api-key header line.
+      # This keeps list items properly indented under codex-api-key when we paste into config.yaml.
+      $normalized = @('codex-api-key:')
+      for ($k = 1; $k -lt $blockLines.Count; $k++) {
+        $bl = $blockLines[$k]
+        if ($bl.Length -ge $headerIndent) { $normalized += $bl.Substring($headerIndent) } else { $normalized += $bl }
       }
 
       $out.CodexBlock = ($normalized -join "`n").TrimEnd()
@@ -697,6 +751,38 @@ function Update-ConfigYaml {
   Set-Content -LiteralPath $ConfigPath -Value ($lines -join "`r`n") -Encoding UTF8
 }
 
+function Patch-ConfigYamlFromPatchFile {
+  param(
+    [Parameter(Mandatory = $true)] [string] $ConfigPath,
+    [Parameter(Mandatory = $true)] [string] $PatchPath
+  )
+
+  if (-not (Test-Path -LiteralPath $PatchPath)) {
+    Write-Warn "Patch config not found: $PatchPath"
+    return $false
+  }
+
+  $patch = Parse-PatchConfig -Path $PatchPath
+  if (-not $patch) {
+    Write-Warn "Patch config is empty or unreadable: $PatchPath"
+    return $false
+  }
+
+  $codexLines = @()
+  if (-not [string]::IsNullOrWhiteSpace($patch.CodexBlock)) {
+    $codexLines = @($patch.CodexBlock -split "`n")
+  }
+
+  # 1) secret-key from patch -> remote-management.secret-key (only if empty)
+  Update-RemoteManagementSecretKey -ConfigPath $ConfigPath -SecretKey $patch.SecretKey
+
+  # 2) Apply top-level fields while preserving existing comments in config.yaml
+  #    - proxy-url must be updated in-place (do not move/remove the surrounding comment block from config.example.yaml)
+  Update-ConfigYaml -ConfigPath $ConfigPath -DefaultSecretKey $null -ProxyUrl $patch.ProxyUrl -EnsureApiKeys $patch.ApiKeys -CodexBlockLines $codexLines
+
+  return $true
+}
+
 function Deploy-PayloadToInstallRoot {
   param(
     [Parameter(Mandatory = $true)] [string] $PayloadRoot,
@@ -769,24 +855,10 @@ if ($PSCmdlet.ShouldProcess($installRootFull, "Extract $zipPath")) {
 $configExample = Join-Path $installRootFull 'config.example.yaml'
 $configPath    = Join-Path $installRootFull 'config.yaml'
 
-$patch = Parse-PatchConfig -Path $PatchConfigPath
-if (-not $patch) {
+if (-not (Test-Path -LiteralPath $PatchConfigPath)) {
   Write-Warn "Patch config not found: $PatchConfigPath. No config values will be injected (except creating config.yaml from example if needed)."
 } else {
   Write-Verbose "Using patch config: $PatchConfigPath"
-
-  if ([string]::IsNullOrWhiteSpace($patch.SecretKey)) {
-    Write-Warn "Patch config is missing secret-key (or it's empty). remote-management.secret-key will not be set."
-  }
-  if (-not $patch.ApiKeys -or $patch.ApiKeys.Count -eq 0) {
-    Write-Warn "Patch config has no api-keys entries. api-keys will not be modified."
-  }
-  if ($null -eq $patch.ProxyUrl) {
-    Write-Verbose "Patch config did not provide proxy-url. proxy-url will be left unchanged."
-  }
-  if ([string]::IsNullOrWhiteSpace($patch.CodexBlock)) {
-    Write-Warn "Patch config is missing codex-api-key-block (or it's empty). codex-api-key will not be updated."
-  }
 }
 
 if (-not (Test-Path -LiteralPath $configPath)) {
@@ -804,36 +876,13 @@ if (-not (Test-Path -LiteralPath $configPath)) {
 
 # Patch config.yaml fields (based on patch config)
 if (Test-Path -LiteralPath $configPath) {
-  $defaultSecret = $null
-  $proxyUrl = $null
-  $ensureKeys = @()
-  $codexLines = $null
-
-  if ($patch) {
-    $defaultSecret = $patch.SecretKey
-    $proxyUrl = $patch.ProxyUrl
-    $ensureKeys = @($patch.ApiKeys)
-    if (-not [string]::IsNullOrWhiteSpace($patch.CodexBlock)) {
-      $codexLines = @($patch.CodexBlock -split "\r?\n")
-    }
-
-    Write-Verbose ("Patch config loaded. secret-key present: {0}; proxy-url provided: {1}; api-keys count: {2}; codex block present: {3}" -f (
-      (-not [string]::IsNullOrWhiteSpace($defaultSecret)),
-      ($null -ne $proxyUrl),
-      ($ensureKeys.Count),
-      (-not [string]::IsNullOrWhiteSpace($patch.CodexBlock))
-    ))
-  } else {
-    Write-Verbose "No patch config found; nothing to patch"
-  }
-
   if ($PSCmdlet.ShouldProcess($configPath, 'Patch config.yaml')) {
-    # IMPORTANT: secret-key in the official template is under remote-management.secret-key.
-    # We'll patch both remote-management.secret-key and the top-level api-keys/codex-api-key.
-    Update-RemoteManagementSecretKey -ConfigPath $configPath -SecretKey $defaultSecret
-
-    Update-ConfigYaml -ConfigPath $configPath -DefaultSecretKey $null -ProxyUrl $proxyUrl -EnsureApiKeys $ensureKeys -CodexBlockLines $codexLines
-    Write-Info "Patched config.yaml."
+    $patched = Patch-ConfigYamlFromPatchFile -ConfigPath $configPath -PatchPath $PatchConfigPath
+    if ($patched) {
+      Write-Info "Patched config.yaml."
+    } else {
+      Write-Warn "Skipped patching config.yaml."
+    }
   }
 }
 

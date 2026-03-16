@@ -38,7 +38,7 @@ setx GITHUB_TOKEN "你的token"
 或仅对当前窗口生效：
 
 ```powershell
-set GITHUB_TOKEN=你的token
+$env:GITHUB_TOKEN="你的token"
 ```
 
 然后再运行脚本。
@@ -65,6 +65,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\update-cliproxyapi.ps1 -Fo
 
 - `secret-key`
   - 仅当目标 `config.yaml` 的 `remote-management.secret-key` 为空时才写入
+  - 写入位置是 `remote-management.secret-key`（不是顶层 `secret-key`）
 - `api-keys`
   - 在已有列表基础上追加去重
 - `proxy-url`（顶层）
@@ -72,8 +73,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\update-cliproxyapi.ps1 -Fo
   - 仅当 `config.patch.yaml` 里提供了**顶层** `proxy-url` 时才会写入；不写则保持目标 `config.yaml` 原值不变
   - 允许写成 `""` 来清空目标值
   - 注意：不会处理/修改 `codex-api-key-block` 内部出现的那些 `proxy-url`
-- `codex-api-key-block`
-  - 把目标 `config.yaml` 的 `codex-api-key` 整段替换为你提供的 block
+- `codex-api-key` / `codex-api-key-block`
+  - 推荐直接在 `config.patch.yaml` 里写 `codex-api-key:`（标准 YAML）
+  - 兼容 `codex-api-key-block: |` 这种“字符串 block”写法：脚本会先把 block 解析成 YAML，再合并进配置
 
 ### 5.1 proxy-url 示例
 
