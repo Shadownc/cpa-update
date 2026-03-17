@@ -28,6 +28,13 @@
 .PARAMETER GitHubToken
   Optional GitHub token. If omitted, uses $env:GITHUB_TOKEN.
 
+.PARAMETER CleanBeforeUpdate
+  (Default: enabled.) Before updating, remove previously downloaded zip(s) matching AssetPattern (and any .partial files)
+  from the current directory, and remove the extracted InstallRoot folder.
+
+.PARAMETER NoClean
+  Disable the default cleanup (overrides CleanBeforeUpdate).
+
 .PARAMETER Force
   Redownload/re-extract even if target exists.
 
@@ -46,6 +53,13 @@ param(
   [Parameter()] [string] $AssetPattern = '*_windows_amd64.zip',
   [Parameter()] [string] $InstallRoot = (Join-Path (Get-Location) 'CLIProxyAPI'),
   [Parameter()] [string] $GitHubToken,
+
+  # Cleanup downloaded zip(s) and extracted folder before updating
+  [Parameter()] [switch] $CleanBeforeUpdate = $true,
+
+  # Disable cleanup (overrides CleanBeforeUpdate)
+  [Parameter()] [switch] $NoClean,
+
   [Parameter()] [switch] $Force,
 
   # Patch config file (read desired values from this YAML-like file)
@@ -163,6 +177,87 @@ function Download-File {
   Invoke-WebRequest -Uri $Url -Headers $Headers -OutFile $OutFile -Method Get -MaximumRedirection 10 -ErrorAction Stop | Out-Null
 }
 
+function Get-FullPath {
+  param([Parameter(Mandatory = $true)] [string] $Path)
+
+  try {
+    $resolved = Resolve-Path -LiteralPath $Path -ErrorAction Stop
+    return $resolved.Path
+  } catch {
+    # If path does not exist yet, resolve relative paths against current directory
+    if ([System.IO.Path]::IsPathRooted($Path)) {
+      return $Path
+    }
+    return (Join-Path (Get-Location) $Path)
+  }
+}
+
+function Test-IsSubPath {
+  param(
+    [Parameter(Mandatory = $true)] [string] $Parent,
+    [Parameter(Mandatory = $true)] [string] $Child
+  )
+
+  try {
+    $p = [System.IO.Path]::GetFullPath($Parent).TrimEnd('\','/')
+    $c = [System.IO.Path]::GetFullPath($Child).TrimEnd('\','/')
+
+    if ($c -ieq $p) { return $true }
+    return $c.StartsWith($p + '\', [System.StringComparison]::OrdinalIgnoreCase)
+  } catch {
+    return $false
+  }
+}
+
+function Clear-UpdateArtifactsBeforeInstall {
+  param(
+    [Parameter(Mandatory = $true)] [string] $CwdFull,
+    [Parameter(Mandatory = $true)] [string] $AssetPattern,
+    [Parameter(Mandatory = $true)] [string] $InstallRootFull,
+    [Parameter(Mandatory = $true)] $PSCmdlet
+  )
+
+  # 1) Remove downloaded zip(s) in current directory
+  $toDelete = New-Object System.Collections.Generic.List[string]
+
+  $zipMatches = @(Get-ChildItem -Path (Join-Path $CwdFull $AssetPattern) -File -ErrorAction SilentlyContinue)
+  foreach ($m in $zipMatches) { $toDelete.Add($m.FullName) }
+
+  $partialMatches = @(Get-ChildItem -Path (Join-Path $CwdFull ("$AssetPattern.partial")) -File -ErrorAction SilentlyContinue)
+  foreach ($m in $partialMatches) { $toDelete.Add($m.FullName) }
+
+  foreach ($p in ($toDelete | Sort-Object -Unique)) {
+    if (Test-Path -LiteralPath $p) {
+      if ($PSCmdlet.ShouldProcess($p, 'Remove old downloaded file')) {
+        Remove-Item -LiteralPath $p -Force
+      }
+    }
+  }
+
+  # 2) Remove extracted install folder (only when it's safely under the current working directory)
+  if (Test-Path -LiteralPath $InstallRootFull) {
+    $root = [System.IO.Path]::GetPathRoot($InstallRootFull)
+    if ($InstallRootFull.TrimEnd('\','/') -ieq $root.TrimEnd('\','/')) {
+      Write-Warn "Refusing to remove install root because it is a drive root: $InstallRootFull"
+      return
+    }
+
+    if (-not (Test-IsSubPath -Parent $CwdFull -Child $InstallRootFull)) {
+      Write-Warn "CleanBeforeUpdate: install root is not under current directory; skipping folder removal: $InstallRootFull"
+      return
+    }
+
+    if ($InstallRootFull.TrimEnd('\','/') -ieq $CwdFull.TrimEnd('\','/')) {
+      Write-Warn "Refusing to remove install root because it equals current directory: $InstallRootFull"
+      return
+    }
+
+    if ($PSCmdlet.ShouldProcess($InstallRootFull, 'Remove old extracted folder')) {
+      Remove-Item -LiteralPath $InstallRootFull -Recurse -Force
+    }
+  }
+}
+
 Use-Tls12
 
 $headers = New-GitHubHeaders -Token $GitHubToken
@@ -209,6 +304,17 @@ if ([string]::IsNullOrWhiteSpace($assetUrl)) {
 $zipPath = Join-Path (Get-Location) $assetName
 $partialPath = "$zipPath.partial"
 
+# Resolve install root early (needed for optional cleanup)
+$installRootFull = Get-FullPath -Path $InstallRoot
+
+if ($NoClean) {
+  Write-Verbose "NoClean: skipping cleanup before update"
+} elseif ($CleanBeforeUpdate) {
+  $cwdFull = Get-FullPath -Path (Get-Location)
+  Write-Info "CleanBeforeUpdate: removing old zip(s) and install folder before update."
+  Clear-UpdateArtifactsBeforeInstall -CwdFull $cwdFull -AssetPattern $AssetPattern -InstallRootFull $installRootFull -PSCmdlet $PSCmdlet
+}
+
 Write-Info "Asset: $assetName ($assetSize bytes)"
 Write-Info "Zip path: $zipPath"
 
@@ -246,21 +352,6 @@ if ($needDownload) {
 }
 
 # Prepare install paths
-function Get-FullPath {
-  param([Parameter(Mandatory = $true)] [string] $Path)
-
-  try {
-    $resolved = Resolve-Path -LiteralPath $Path -ErrorAction Stop
-    return $resolved.Path
-  } catch {
-    # If path does not exist yet, resolve relative paths against current directory
-    if ([System.IO.Path]::IsPathRooted($Path)) {
-      return $Path
-    }
-    return (Join-Path (Get-Location) $Path)
-  }
-}
-
 function Get-InsertIndexForTopLevelKeys {
   param([Parameter()] [string[]] $Lines)
 
@@ -813,8 +904,6 @@ function Deploy-PayloadToInstallRoot {
     }
   }
 }
-
-$installRootFull = Get-FullPath -Path $InstallRoot
 
 $stagingRoot = Join-Path $installRootFull '.staging'
 $stagingDir  = Join-Path $stagingRoot ([guid]::NewGuid().ToString('N'))

@@ -48,13 +48,19 @@ $env:GITHUB_TOKEN="你的token"
 - `-Owner` / `-Repo`：默认 `router-for-me / CLIProxyAPI`
 - `-AssetPattern`：默认 `*_windows_amd64.zip`
 - `-InstallRoot`：默认当前目录下的 `./CLIProxyAPI`
+- `-CleanBeforeUpdate`：更新前清理旧下载的 zip / `.partial`，并删除解压目录 `InstallRoot`（默认开启）
+- `-NoClean`：不执行更新前清理（覆盖 `-CleanBeforeUpdate`）
 - `-Force`：强制重新下载/解压（注意：可能会覆盖安装目录里的文件；`config.yaml` 默认保留）
 - `-PatchConfigPath`：补丁配置文件路径（默认当前目录下 `./config.patch.yaml`）
 
 示例：
 
 ```powershell
+# 默认会在更新前清理旧 zip / 解压目录
 powershell -NoProfile -ExecutionPolicy Bypass -File .\update-cliproxyapi.ps1 -Force -Verbose
+
+# 如需保留现有 zip / 解压目录，不做清理：
+powershell -NoProfile -ExecutionPolicy Bypass -File .\update-cliproxyapi.ps1 -NoClean -Force -Verbose
 ```
 
 ## 5. 补丁配置文件（config.patch.yaml）
