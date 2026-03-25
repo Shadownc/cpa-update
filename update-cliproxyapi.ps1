@@ -975,4 +975,14 @@ if (Test-Path -LiteralPath $configPath) {
   }
 }
 
+# Remove downloaded zip after successful install (unless NoClean is specified)
+if (-not $NoClean) {
+  if ($PSCmdlet.ShouldProcess($zipPath, 'Remove downloaded zip after install')) {
+    if (Test-Path -LiteralPath $zipPath) {
+      Remove-Item -LiteralPath $zipPath -Force
+      Write-Info "Removed downloaded zip after install."
+    }
+  }
+}
+
 Write-Info "Done. Installed files are under: $installRootFull"
