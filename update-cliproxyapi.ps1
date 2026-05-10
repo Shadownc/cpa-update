@@ -7,7 +7,7 @@
   - Finds the asset matching *_windows_amd64.zip.
   - Downloads the zip into the current working directory ($PWD).
   - Extracts into a dedicated folder: ./CLIProxyAPI/ (shallow layout).
-  - Ensures config.yaml exists, and patches secret-key / api-keys / proxy-url / codex-api-key.
+  - Ensures config.yaml exists, and patches secret-key / api-keys / proxy-url / codex-api-key / claude-api-key.
 
   Notes:
   - This script is intended to be run from the directory where you want the ZIP downloaded.
@@ -524,17 +524,18 @@ function Upsert-ApiKeys {
   return $newLines
 }
 
-function Replace-CodexApiKeyBlock {
+function Replace-TopLevelBlock {
   param(
     [Parameter()] [string[]] $Lines,
-    [Parameter(Mandatory = $true)] [string[]] $CodexBlockLines
+    [Parameter(Mandatory = $true)] [string] $KeyName,
+    [Parameter(Mandatory = $true)] [string[]] $BlockLines
   )
 
-  $range = Get-TopLevelBlockRange -Lines $Lines -KeyName 'codex-api-key'
+  $range = Get-TopLevelBlockRange -Lines $Lines -KeyName $KeyName
   if ($range) {
     $newLines = @()
     if ($range.Start -gt 0) { $newLines += $Lines[0..($range.Start-1)] }
-    $newLines += $CodexBlockLines
+    $newLines += $BlockLines
     if ($range.End -lt $Lines.Count) { $newLines += $Lines[$range.End..($Lines.Count-1)] }
     return $newLines
   }
@@ -544,7 +545,7 @@ function Replace-CodexApiKeyBlock {
   if ($newLines.Count -gt 0 -and $newLines[-1].Trim() -ne '') {
     $newLines += ''
   }
-  $newLines += $CodexBlockLines
+  $newLines += $BlockLines
   return $newLines
 }
 
@@ -568,10 +569,10 @@ function Parse-PatchConfig {
     ProxyUrl  = $null
 
     CodexBlock = $null
+    ClaudeBlock = $null
   }
 
   $baseIndent = $null
-  $codexSource = $null
 
   $i = 0
   while ($i -lt $lines.Count) {
@@ -652,8 +653,6 @@ function Parse-PatchConfig {
     if ($trimStart -match '^codex-api-key-block\s*:\s*\|[\+\-]?\s*(#.*)?$') {
       if ($headerIndent -ne $baseIndent) { $i++; continue }
 
-      $codexSource = 'codex-api-key-block'
-
       $blockLines = New-Object System.Collections.Generic.List[string]
       $i++
       while ($i -lt $lines.Count) {
@@ -688,14 +687,13 @@ function Parse-PatchConfig {
       continue
     }
 
-    # Compatibility: allow users to provide codex-api-key directly (instead of codex-api-key-block)
-    if ($trimStart -match '^codex-api-key\s*:\s*(#.*)?$') {
+    # Compatibility: allow users to provide api-key blocks directly (instead of *-block literal strings)
+    if ($trimStart -match '^(codex-api-key|claude-api-key)\s*:\s*(#.*)?$') {
       if ($headerIndent -ne $baseIndent) { $i++; continue }
 
-      $codexSource = 'codex-api-key'
-
+      $keyName = $Matches[1]
       $blockLines = New-Object System.Collections.Generic.List[string]
-      $blockLines.Add('codex-api-key:')
+      $blockLines.Add("${keyName}:")
       $i++
       while ($i -lt $lines.Count) {
         $l2 = $lines[$i]
@@ -710,15 +708,19 @@ function Parse-PatchConfig {
         $i++
       }
 
-      # Normalize indentation: strip the indentation of the codex-api-key header line.
-      # This keeps list items properly indented under codex-api-key when we paste into config.yaml.
-      $normalized = @('codex-api-key:')
+      # Normalize indentation: strip the indentation of the api-key header line.
+      $normalized = @("${keyName}:")
       for ($k = 1; $k -lt $blockLines.Count; $k++) {
         $bl = $blockLines[$k]
         if ($bl.Length -ge $headerIndent) { $normalized += $bl.Substring($headerIndent) } else { $normalized += $bl }
       }
 
-      $out.CodexBlock = ($normalized -join "`n").TrimEnd()
+      $normalizedBlock = ($normalized -join "`n").TrimEnd()
+      if ($keyName -eq 'codex-api-key') {
+        $out.CodexBlock = $normalizedBlock
+      } else {
+        $out.ClaudeBlock = $normalizedBlock
+      }
       continue
     }
 
@@ -787,7 +789,8 @@ function Update-ConfigYaml {
     [Parameter()] [string] $DefaultSecretKey,
     [Parameter()] [string] $ProxyUrl,
     [Parameter()] [string[]] $EnsureApiKeys,
-    [Parameter()] [string[]] $CodexBlockLines
+    [Parameter()] [string[]] $CodexBlockLines,
+    [Parameter()] [string[]] $ClaudeBlockLines
   )
 
   $raw = Get-Content -LiteralPath $ConfigPath -Raw
@@ -836,7 +839,13 @@ function Update-ConfigYaml {
   # codex-api-key: replace only if patch provided
   if ($CodexBlockLines -and $CodexBlockLines.Count -gt 0) {
     Write-Verbose "Replacing/adding codex-api-key block from patch config"
-    $lines = @(Replace-CodexApiKeyBlock -Lines $lines -CodexBlockLines $CodexBlockLines)
+    $lines = @(Replace-TopLevelBlock -Lines $lines -KeyName 'codex-api-key' -BlockLines $CodexBlockLines)
+  }
+
+  # claude-api-key: replace only if patch provided
+  if ($ClaudeBlockLines -and $ClaudeBlockLines.Count -gt 0) {
+    Write-Verbose "Replacing/adding claude-api-key block from patch config"
+    $lines = @(Replace-TopLevelBlock -Lines $lines -KeyName 'claude-api-key' -BlockLines $ClaudeBlockLines)
   }
 
   Set-Content -LiteralPath $ConfigPath -Value ($lines -join "`r`n") -Encoding UTF8
@@ -864,12 +873,17 @@ function Patch-ConfigYamlFromPatchFile {
     $codexLines = @($patch.CodexBlock -split "`n")
   }
 
+  $claudeLines = @()
+  if (-not [string]::IsNullOrWhiteSpace($patch.ClaudeBlock)) {
+    $claudeLines = @($patch.ClaudeBlock -split "`n")
+  }
+
   # 1) secret-key from patch -> remote-management.secret-key (only if empty)
   Update-RemoteManagementSecretKey -ConfigPath $ConfigPath -SecretKey $patch.SecretKey
 
   # 2) Apply top-level fields while preserving existing comments in config.yaml
   #    - proxy-url must be updated in-place (do not move/remove the surrounding comment block from config.example.yaml)
-  Update-ConfigYaml -ConfigPath $ConfigPath -DefaultSecretKey $null -ProxyUrl $patch.ProxyUrl -EnsureApiKeys $patch.ApiKeys -CodexBlockLines $codexLines
+  Update-ConfigYaml -ConfigPath $ConfigPath -DefaultSecretKey $null -ProxyUrl $patch.ProxyUrl -EnsureApiKeys $patch.ApiKeys -CodexBlockLines $codexLines -ClaudeBlockLines $claudeLines
 
   return $true
 }
